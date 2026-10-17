@@ -8,6 +8,7 @@
 /* Includes ------------------------------------------------------------------*/
 
 #include "edf_base.h"
+#include "cubemx.h"
 
 /* Private constants ---------------------------------------------------------*/
 
@@ -43,8 +44,25 @@ extern void timer_update(void);
  */
 uint8_t hal_timer_init(timer_tick_t tick_freq)
 {
-	(void)tick_freq;
-	return EDF_SUCCESS;
+    uint32_t load_value;
+
+    /* 计算重装载值 */
+    load_value = SystemCoreClock / tick_freq;
+    if (load_value == 0 || load_value > 0x00FFFFFFUL)
+    {
+        return EDF_FAILURE;  /* 频率不合法或超出 SysTick 24 位计数范围 */
+    }
+
+    /* 配置 SysTick NVIC 优先级 */
+  	HAL_NVIC_SetPriority(SysTick_IRQn, 3, 0);
+
+    /* 配置 SysTick */
+    SysTick->LOAD = load_value - 1;               /* 设置重装载值 */
+    SysTick->VAL  = 0;                            /* 清空当前计数器 */
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk    /* 使用处理器时钟 */
+                  | SysTick_CTRL_TICKINT_Msk;     /* 使能中断（暂不启动计数） */
+
+    return EDF_SUCCESS;
 }
 
 /**
@@ -54,7 +72,10 @@ uint8_t hal_timer_init(timer_tick_t tick_freq)
  */
 uint8_t hal_timer_start(void)
 {
-	return EDF_SUCCESS;
+    /* 使能 SysTick 计数器 */
+    SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
+
+    return EDF_SUCCESS;
 }
 
 /**
@@ -64,7 +85,10 @@ uint8_t hal_timer_start(void)
  */
 uint8_t hal_timer_stop(void)
 {
-	return EDF_SUCCESS;
+    /* 禁用 SysTick 计数器 */
+    SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
+
+    return EDF_SUCCESS;
 }
 
 /**
@@ -77,3 +101,12 @@ void hal_timer_isr(void)
 }
 
 /* Private functions --------------------------------------------------------*/
+
+/**
+ * @brief SysTick 中断处理函数
+ * @note 与中断向量表中的 SysTick_Handler 对应
+ */
+void SysTick_Handler(void)
+{
+    hal_timer_isr();
+}

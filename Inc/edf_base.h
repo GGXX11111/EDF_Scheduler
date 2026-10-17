@@ -294,6 +294,9 @@ typedef uint16_t                msg_len_t;          // 消息长度类型
 /* ==================== 当前中断开关实现 ==================== */
 
 /* 中断开关(用户实现) */
+#include "stm32g0xx.h"
+#define HAL_DISABLE_INTERRUPTS()                __disable_irq()
+#define HAL_ENABLE_INTERRUPTS()                 __enable_irq()
 
 /* ========================================================= */
 
@@ -370,6 +373,7 @@ extern volatile hal_data_align_t g_critical_count;
 /* ==================== 当前低功耗操作实现 =================== */
 
 /* 低功耗操作(用户实现) */	
+#define HAL_WFI()								__WFI()
 
 /* ========================================================= */
 
