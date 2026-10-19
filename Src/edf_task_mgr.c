@@ -9,43 +9,28 @@
 
 #include "edf_task_mgr.h"
 #include "edf_base.h"
-#include "edf_mem_mgr.h"
 
 /* Private constants ---------------------------------------------------------*/
 
 /* Private types -------------------------------------------------------------*/
-
-/* 任务控制块定义 */
-struct task_ctrl_blk
-{
-    struct task_ctrl_blk *next_ready;       // 就绪队列下一个节点
-    task_priority_t task_priority;          // 任务优先级
-    task_status_t task_status;              // 任务状态
-	uint8_t reserved[2];
-    task_event_t task_event;                // 任务事件标志
-    fp_task_init_func task_init_func;       // 初始化函数指针
-    fp_task_handler_func task_handler_func; // 事件处理函数指针
-    void *task_data;                        // 任务相关数据指针
-};
 
 /* 优先级就绪子队列定义 */
 typedef struct priority_ready_queue
 {
     task_t *head;                       // 子队列头指针
     task_t *tail;                       // 子队列尾指针
-    uint8_t task_count;                 // 子队列任务数量
 } priority_ready_queue_t;
 
 /* Private variables ---------------------------------------------------------*/
 
 /* 优先级位图：bit[i]=1 表示优先级i有就绪任务 */
-static uint8_t g_priority_bitmap;
+static volatile uint8_t g_priority_bitmap;
 
 /* 每个优先级一个就绪子队列 */
-static priority_ready_queue_t g_ready_table[TASK_PRIORITY_COUNT] = {0};
+static volatile priority_ready_queue_t g_ready_table[TASK_PRIORITY_MAX_COUNT] = {0};
 
 /* 当前运行任务指针 */
-static task_t *g_current_task = (task_t*)NULL;
+static task_t * volatile g_current_task = (task_t*)NULL;
 
 /* Private defines -----------------------------------------------------------*/
 
@@ -53,8 +38,8 @@ static task_t *g_current_task = (task_t*)NULL;
 
 /* 静态函数声明 */
 static task_t *get_next_active_task(void);
-static void add_to_ready_list(task_t *task);
-static void remove_from_ready_list(task_t *task);
+static edf_status_t add_to_ready_list(task_t *task);
+static edf_status_t remove_from_ready_list(task_t *task);
 
 /* Exported constants --------------------------------------------------------*/
 
@@ -63,17 +48,16 @@ static void remove_from_ready_list(task_t *task);
 /* Exported functions --------------------------------------------------------*/
 
 /**
- * @brief 创建任务
+ * @brief 初始化任务（静态创建）
  */
-task_t *task_create(fp_task_init_func init_func,
-                    fp_task_handler_func handler_func,
-                    task_priority_t priority,
-                    void *task_data)
+task_t *task_init(task_t *task,
+                  fp_task_init_func init_func,
+                  fp_task_handler_func handler_func,
+                  task_priority_t priority,
+                  void *task_data)
 {
-    task_t *new_task;
-
     /* 参数检查 */
-    if (handler_func == (fp_task_handler_func)NULL)
+    if (task == (task_t*)NULL || handler_func == (fp_task_handler_func)NULL)
     {
         return (task_t*)NULL;
     }
@@ -83,131 +67,101 @@ task_t *task_create(fp_task_init_func init_func,
         return (task_t*)NULL;
     }
 
-    /* 创建新的任务控制块 */
-    new_task = (task_t*)mem_malloc(sizeof(task_t));
-    if (new_task == (task_t*)NULL)
+    /* 已初始化的控制块不允许重复初始化，避免覆盖调度器内部链接 */
+    if (task->inited != 0)
     {
         return (task_t*)NULL;
     }
 
-    /* 初始化新的任务控制块 */
-    new_task->next_ready = (task_t*)NULL;
-    new_task->task_priority = priority;
-    new_task->task_status = TASK_STATUS_BLOCKED;
-    new_task->task_event = EVENT_NULL;
-    new_task->task_handler_func = handler_func;
-    new_task->task_init_func = init_func;
-    new_task->task_data = task_data;
+    /* 初始化任务控制块 */
+    task->next_ready 		= (task_t*)NULL;
+    task->task_priority 	= priority;
+    task->in_ready_list 	= 0;
+    task->task_event 		= EVENT_NULL;
+    task->task_handler_func = handler_func;
+    task->task_init_func 	= init_func;
+    task->task_data 		= task_data;
+    task->inited 			= 1;
 
     /* 创建后立即调用初始化函数 */
     if (init_func != (fp_task_init_func)NULL)
     {
-        init_func(new_task, task_data);
+        init_func(task, task_data);
     }
 
-    return new_task;
-}
-
-/**
- * @brief 删除任务
- */
-void task_delete(task_t *task)
-{
-    /* 参数检查 */
-    if (task == (task_t*)NULL)
-    {
-        return;
-    }
-
-    HAL_ENTER_CRITICAL_SECTION();
-
-    /* 检查任务是否正在运行 */
-    if (task == g_current_task)
-    {
-        HAL_EXIT_CRITICAL_SECTION();
-
-        return;
-    }
-
-    remove_from_ready_list(task);
-
-    HAL_EXIT_CRITICAL_SECTION();
-
-    mem_free(task);
+    return task;
 }
 
 /**
  * @brief 设置任务事件
  */
-uint8_t task_set_event(task_t *task, task_event_t event)
+edf_status_t task_set_event(task_t *task, task_event_t event)
 {
-    task_event_t old_event;
+    edf_status_t status = EDF_OK;
 
     /* 参数检查 */
-    if (task == (task_t*)NULL)
+    if (task == (task_t*)NULL || task->inited == 0)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     if (event == EVENT_NULL)
     {
-        return EDF_SUCCESS;
+        return EDF_OK;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
-
-    /* 保存原有事件状态 */
-    old_event = task->task_event;
 
     /* 设置任务事件标志 */
     task->task_event |= event;
 
     /* 如果之前没有事件，现在有事件了，则加入就绪队列 */
-    if ((old_event == EVENT_NULL) &&
-        (task->task_event != EVENT_NULL) &&
-        (task != g_current_task))
+    if ((task->in_ready_list == 0) && 
+		(task->task_event != EVENT_NULL) && 
+		(task != g_current_task))
     {
-        task->task_status = TASK_STATUS_READY;
-        add_to_ready_list(task);
+        status = add_to_ready_list(task);
     }
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return EDF_SUCCESS;
+    return status;
 }
 
 /**
  * @brief 清除任务事件
  */
-uint8_t task_clear_event(task_t *task, task_event_t event)
+edf_status_t task_clear_event(task_t *task, task_event_t event)
 {
+    edf_status_t status = EDF_OK;
+
     /* 参数检查 */
-    if (task == (task_t*)NULL)
+    if (task == (task_t*)NULL || task->inited == 0)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     if (event == EVENT_NULL)
     {
-        return EDF_SUCCESS;
+        return EDF_OK;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
 
-    if (task != g_current_task)
-    {
-        task->task_event &= ~event;
+	/* 清除任务事件标志 */
+    task->task_event &= ~event;
 
-        if (task->task_event == EVENT_NULL)
-        {
-            task->task_status = TASK_STATUS_BLOCKED;
-            remove_from_ready_list(task);
-        }
+	/* 如果之前有事件，现在没有事件了，则从就绪队列中移除 */
+    if ((task->in_ready_list != 0) && 
+		(task->task_event == EVENT_NULL) && 
+		(task != g_current_task))
+    {
+        status = remove_from_ready_list(task);
     }
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return EDF_SUCCESS;
+    return status;
 }
 
 /**
@@ -231,31 +185,21 @@ void task_scheduler_start(void)
         if (current_task != (task_t*)NULL)
         {
             task_event = current_task->task_event;
-            current_task->task_event = 0;
+            current_task->task_event = EVENT_NULL;
         }
 
         if (task_event != EVENT_NULL)
         {
             g_current_task = current_task;
-            current_task->task_status = TASK_STATUS_RUNNING;
         }
 
         HAL_EXIT_CRITICAL_SECTION();
 
         if (task_event != EVENT_NULL)
         {
-
-            /* 调用任务事件处理函数，获取返回的事件标志 */
-            if (current_task->task_handler_func != (fp_task_handler_func)NULL)
-            {
-                ret_event = current_task->task_handler_func(current_task,
-                                                            task_event,
-                                                            current_task->task_data);
-            }
-            else
-            {
-                ret_event = EVENT_NULL;
-            }
+            ret_event = current_task->task_handler_func(current_task,
+                                                        task_event,
+                                                        current_task->task_data);
 
             HAL_ENTER_CRITICAL_SECTION();
 
@@ -264,19 +208,10 @@ void task_scheduler_start(void)
 
             if (current_task->task_event != EVENT_NULL)
             {
-                current_task->task_status = TASK_STATUS_READY;
                 add_to_ready_list(current_task);
-            }
-            else
-            {
-                current_task->task_status = TASK_STATUS_BLOCKED;
             }
 
             HAL_EXIT_CRITICAL_SECTION();
-        }
-        else
-        {
-            HAL_WFI();
         }
     }
 }
@@ -291,8 +226,8 @@ void task_scheduler_start(void)
 static task_t *get_next_active_task(void)
 {
     task_t *active_task;
-    int8_t highest_prio;
-    priority_ready_queue_t *queue;
+    uint8_t highest_prio;
+    volatile priority_ready_queue_t *queue;
 
     /* 位图为空，无就绪任务 */
     if (g_priority_bitmap == 0)
@@ -322,51 +257,48 @@ static task_t *get_next_active_task(void)
         {
             queue->tail = (task_t*)NULL;
         }
-        queue->task_count--;
+
         active_task->next_ready = (task_t*)NULL;
+        active_task->in_ready_list = 0;
 
         /* 子队列空了，清除位图对应位 */
-        if (queue->task_count == 0)
+        if (queue->head == (task_t*)NULL)
         {
             g_priority_bitmap &= ~(1U << highest_prio);
         }
+    }
+    else
+    {
+        g_priority_bitmap &= ~(1U << highest_prio);
     }
 
     return active_task;
 }
 
 /**
- * @brief 获取当前正在运行的任务句柄
- * @return 当前任务句柄，未启动或无任务运行时返回NULL
- */
-task_t *task_get_current(void)
-{
-    return g_current_task;
-}
-
-/**
  * @brief 将任务添加到对应优先级子队列尾部
  * @param task 任务控制块指针
+ * @return 成功入队（或已在队列中）返回EDF_OK，否则返回EDF_ERR
  * @note 此函数必须在临界区内调用
- * @note 同优先级任务按FIFO顺序排列，自然实现Round-Robin轮转
  */
-static void add_to_ready_list(task_t *task)
+static edf_status_t add_to_ready_list(task_t *task)
 {
-    uint8_t prio = task->task_priority;
-    priority_ready_queue_t *queue = &g_ready_table[prio];
-    task_t *curr;
+    task_priority_t prio = task->task_priority;
+    volatile priority_ready_queue_t *queue;
 
-    /* 检查是否已在子队列中（防重复添加） */
-    curr = queue->head;
-    while (curr != (task_t*)NULL)
+    /* 优先级越界保护：控制块内存被踩时避免越界写 */
+    if (prio >= TASK_PRIORITY_MAX_COUNT)
     {
-        if (curr == task)
-        {
-            return;
-        }
-        curr = curr->next_ready;
+        return EDF_ERR;
     }
 
+    /* 任务已在子队列中，目标状态已达成 */
+    if (task->in_ready_list != 0)
+    {
+        return EDF_OK;
+    }
+
+    queue = &g_ready_table[prio];
     task->next_ready = (task_t*)NULL;
 
     /* 插入子队列尾部 */
@@ -380,24 +312,41 @@ static void add_to_ready_list(task_t *task)
         queue->tail->next_ready = task;
         queue->tail = task;
     }
-    queue->task_count++;
+
+    task->in_ready_list = 1;
 
     /* 置位位图 */
     g_priority_bitmap |= (1U << prio);
+
+    return EDF_OK;
 }
 
 /**
  * @brief 从对应优先级子队列中移除任务
  * @param task 任务控制块指针
+ * @return 成功移除（或不在队列中）返回EDF_OK，否则返回EDF_ERR
  * @note 此函数必须在临界区内调用
  */
-static void remove_from_ready_list(task_t *task)
+static edf_status_t remove_from_ready_list(task_t *task)
 {
-    uint8_t prio = task->task_priority;
-    priority_ready_queue_t *queue = &g_ready_table[prio];
+    task_priority_t prio = task->task_priority;
+    volatile priority_ready_queue_t *queue;
     task_t *curr;
     task_t *prev;
 
+    /* 优先级越界保护：控制块内存被踩时避免越界访问 */
+    if (prio >= TASK_PRIORITY_MAX_COUNT)
+    {
+        return EDF_ERR;
+    }
+
+    /* 任务本就不在子队列中，目标状态已达成 */
+    if (task->in_ready_list == 0)
+    {
+        return EDF_OK;
+    }
+
+    queue = &g_ready_table[prio];
     prev = (task_t*)NULL;
     curr = queue->head;
 
@@ -422,17 +371,22 @@ static void remove_from_ready_list(task_t *task)
                 }
             }
             curr->next_ready = (task_t*)NULL;
-            queue->task_count--;
+            curr->in_ready_list = 0;
 
             /* 子队列空了，清除位图对应位 */
-            if (queue->task_count == 0)
+            if (queue->head == (task_t*)NULL)
             {
                 g_priority_bitmap &= ~(1U << prio);
             }
 
-            return;
+            return EDF_OK;
         }
         prev = curr;
         curr = curr->next_ready;
     }
+
+    /* 链表与标志不一致：清除标志，允许后续重新入队 */
+    task->in_ready_list = 0;
+
+    return EDF_ERR;
 }

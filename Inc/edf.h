@@ -15,7 +15,6 @@ extern "C" {
 /* Includes ------------------------------------------------------------------*/
 
 #include "edf_base.h"
-#include "edf_mem_mgr.h"
 #include "edf_task_mgr.h"
 #include "edf_timer_mgr.h"
 #include "edf_msg_mgr.h"

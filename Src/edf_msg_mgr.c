@@ -9,31 +9,20 @@
 
 #include "edf_msg_mgr.h"
 #include "edf_base.h"
-#include "edf_mem_mgr.h"
 #include "edf_task_mgr.h"
 
 /* Private constants ---------------------------------------------------------*/
 
 /* Private types -------------------------------------------------------------*/
 
-/* 消息队列定义 */
-struct msg_queue
-{
-    uint8_t *buffer;        	// 环形缓冲（创建时分配 msg_size × capacity）
-    msg_len_t msg_size;      	// 单条消息的固定大小（字节）
-    uint8_t overflow;        	// 溢出标志：队列满导致 send 失败时置位
-    uint8_t reserved0[1];
-    msg_count_t capacity;      	// 队列最大可容纳的消息条数
-    msg_count_t head;          	// 读索引
-    msg_count_t tail;          	// 写索引
-    msg_count_t count;         	// 当前消息数
-    task_t *notify_task;   		// 消息到达时通知的任务
-    task_event_t notify_event; 	// 消息到达时触发的事件标志
-};
-
 /* Private variables ---------------------------------------------------------*/
 
 /* Private defines -----------------------------------------------------------*/
+
+/**
+ * @brief 检查队列容量是否为 2 的幂（内部索引取模依赖此约束）
+ */
+#define QUEUE_CAP_IS_POW2(n)    (((n) != 0) && (((n) & ((n) - 1U)) == 0U))
 
 /* Private function prototypes ----------------------------------------------*/
 
@@ -44,77 +33,53 @@ struct msg_queue
 /* Exported functions --------------------------------------------------------*/
 
 /**
- * @brief 创建消息队列
+ * @brief 初始化消息队列（静态创建）
  */
-msg_queue_t *msg_queue_create(msg_len_t msg_size,
-                              msg_count_t capacity,
-                              task_t *notify_task,
-                              task_event_t notify_event)
+msg_queue_t *msg_queue_init(msg_queue_t *queue,
+                            uint8_t *buffer,
+                            msg_len_t msg_size,
+                            msg_count_t capacity,
+                            task_t *notify_task,
+                            task_event_t notify_event)
 {
-    msg_queue_t *new_queue;
-
-    /* 参数检查 */
-    if (msg_size == 0 || capacity == 0)
+    /* 参数检查：容量必须为 2 的幂（内部索引取模依赖此约束） */
+    if (queue == (msg_queue_t*)NULL || buffer == (uint8_t*)NULL ||
+        msg_size == 0 || capacity == 0 || !QUEUE_CAP_IS_POW2(capacity))
     {
         return (msg_queue_t*)NULL;
     }
 
-    /* 分配队列控制块 */
-    new_queue = (msg_queue_t*)mem_malloc(sizeof(msg_queue_t));
-    if (new_queue == (msg_queue_t*)NULL)
+    /* 已初始化的控制块不允许重复初始化，避免覆盖队列内部状态 */
+    if (queue->inited != 0)
     {
-        return (msg_queue_t*)NULL;
-    }
-
-    /* 一次性分配环形缓冲 */
-    new_queue->buffer = (uint8_t*)mem_malloc((hal_size_t)msg_size * capacity);
-    if (new_queue->buffer == (uint8_t*)NULL)
-    {
-        mem_free(new_queue);
-
         return (msg_queue_t*)NULL;
     }
 
     /* 初始化队列 */
-    new_queue->msg_size     = msg_size;
-    new_queue->capacity     = capacity;
-    new_queue->head         = 0;
-    new_queue->tail         = 0;
-    new_queue->count        = 0;
-    new_queue->overflow     = 0;
-    new_queue->notify_task  = notify_task;
-    new_queue->notify_event = notify_event;
+    queue->buffer 		= buffer;
+    queue->msg_size     = msg_size;
+    queue->capacity     = capacity;
+    queue->head         = 0;
+    queue->tail         = 0;
+    queue->count        = 0;
+    queue->notify_task  = notify_task;
+    queue->notify_event = notify_event;
+    queue->inited       = 1;
 
-    return new_queue;
-}
-
-/**
- * @brief 删除消息队列并释放内存
- */
-void msg_queue_delete(msg_queue_t *queue)
-{
-    /* 参数检查 */
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return;
-    }
-
-    /* 释放环形缓冲和队列控制块 */
-    mem_free(queue->buffer);
-    mem_free(queue);
+    return queue;
 }
 
 /**
  * @brief 发送消息到队列（拷贝固定长度数据）
  */
-uint8_t msg_queue_send(msg_queue_t *queue, const void *data)
+edf_status_t msg_queue_send(msg_queue_t *queue, const void *data)
 {
     msg_len_t i;
 
     /* 参数检查 */
-    if (queue == (msg_queue_t*)NULL || data == (const void*)NULL)
+    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || data == (const void*)NULL)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
@@ -122,11 +87,9 @@ uint8_t msg_queue_send(msg_queue_t *queue, const void *data)
     /* 队列满 */
     if (queue->count >= queue->capacity)
     {
-        queue->overflow = 1;
-
         HAL_EXIT_CRITICAL_SECTION();
 
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     /* 拷贝固定长度数据到写指针位置 */
@@ -136,7 +99,7 @@ uint8_t msg_queue_send(msg_queue_t *queue, const void *data)
     }
 
     /* 移动写指针 */
-    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->tail = ((queue->tail + 1U) & (queue->capacity - 1U));
     queue->count++;
 
     HAL_EXIT_CRITICAL_SECTION();
@@ -147,20 +110,20 @@ uint8_t msg_queue_send(msg_queue_t *queue, const void *data)
         task_set_event(queue->notify_task, queue->notify_event);
     }
 
-    return EDF_SUCCESS;
+    return EDF_OK;
 }
 
 /**
  * @brief 从队列接收消息（拷贝固定长度数据）
  */
-uint8_t msg_queue_recv(msg_queue_t *queue, void *out)
+edf_status_t msg_queue_recv(msg_queue_t *queue, void *out)
 {
     msg_len_t i;
 
     /* 参数检查 */
-    if (queue == (msg_queue_t*)NULL || out == (void*)NULL)
+    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || out == (void*)NULL)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
@@ -170,7 +133,7 @@ uint8_t msg_queue_recv(msg_queue_t *queue, void *out)
     {
         HAL_EXIT_CRITICAL_SECTION();
 
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     /* 从读指针位置拷贝固定长度数据 */
@@ -180,24 +143,24 @@ uint8_t msg_queue_recv(msg_queue_t *queue, void *out)
     }
 
     /* 移动读指针 */
-    queue->head = (queue->head + 1) % queue->capacity;
+    queue->head = ((queue->head + 1U) & (queue->capacity - 1U));
     queue->count--;
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return EDF_SUCCESS;
+    return EDF_OK;
 }
 
 /**
  * @brief 窥视队首消息
  */
-uint8_t msg_queue_peek(msg_queue_t *queue, void *out)
+edf_status_t msg_queue_peek(msg_queue_t *queue, void *out)
 {
     msg_len_t i;
 
-    if (queue == (msg_queue_t*)NULL || out == (void*)NULL)
+    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || out == (void*)NULL)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
@@ -207,7 +170,7 @@ uint8_t msg_queue_peek(msg_queue_t *queue, void *out)
     {
         HAL_EXIT_CRITICAL_SECTION();
 
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     for (i = 0; i < queue->msg_size; i++)
@@ -217,7 +180,7 @@ uint8_t msg_queue_peek(msg_queue_t *queue, void *out)
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return EDF_SUCCESS;
+    return EDF_OK;
 }
 
 /**
@@ -225,7 +188,7 @@ uint8_t msg_queue_peek(msg_queue_t *queue, void *out)
  */
 msg_count_t msg_queue_get_count(msg_queue_t *queue)
 {
-    if (queue == (msg_queue_t*)NULL)
+    if (queue == (msg_queue_t*)NULL || queue->inited == 0)
     {
         return 0;
     }
@@ -234,102 +197,13 @@ msg_count_t msg_queue_get_count(msg_queue_t *queue)
 }
 
 /**
- * @brief 获取队列剩余容量
- */
-msg_count_t msg_queue_get_free(msg_queue_t *queue)
-{
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return 0;
-    }
-
-    return (msg_count_t)(queue->capacity - queue->count);
-}
-
-/**
- * @brief 判断队列是否为空
- */
-uint8_t msg_queue_is_empty(msg_queue_t *queue)
-{
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return EDF_FAILURE;
-    }
-
-    return (queue->count == 0) ? EDF_SUCCESS : EDF_FAILURE;
-}
-
-/**
- * @brief 判断队列是否已满
- */
-uint8_t msg_queue_is_full(msg_queue_t *queue)
-{
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return EDF_FAILURE;
-    }
-
-    return (queue->count >= queue->capacity) ? EDF_SUCCESS : EDF_FAILURE;
-}
-
-/**
- * @brief 检查并清除溢出标志
- */
-uint8_t msg_queue_check_overflow(msg_queue_t *queue)
-{
-    uint8_t result;
-
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return EDF_FAILURE;
-    }
-
-    HAL_ENTER_CRITICAL_SECTION();
-
-    result = (queue->overflow != 0) ? EDF_SUCCESS : EDF_FAILURE;
-    queue->overflow = 0;
-
-    HAL_EXIT_CRITICAL_SECTION();
-
-    return result;
-}
-
-/**
- * @brief 丢弃若干条队首消息
- */
-uint8_t msg_queue_skip(msg_queue_t *queue, msg_count_t n)
-{
-    msg_count_t avail;
-
-    if (queue == (msg_queue_t*)NULL)
-    {
-        return EDF_FAILURE;
-    }
-
-    HAL_ENTER_CRITICAL_SECTION();
-
-    avail = queue->count;
-    if (n > avail)
-    {
-        n = avail;
-    }
-
-    queue->head  = (queue->head + n) % queue->capacity;
-    queue->count -= n;
-
-    HAL_EXIT_CRITICAL_SECTION();
-
-    return EDF_SUCCESS;
-}
-
-/**
  * @brief 清空队列中的所有消息
  */
-uint8_t msg_queue_flush(msg_queue_t *queue)
+edf_status_t msg_queue_flush(msg_queue_t *queue)
 {
-    if (queue == (msg_queue_t*)NULL)
+    if (queue == (msg_queue_t*)NULL || queue->inited == 0)
     {
-        return EDF_FAILURE;
+        return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
@@ -339,7 +213,7 @@ uint8_t msg_queue_flush(msg_queue_t *queue)
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return EDF_SUCCESS;
+    return EDF_OK;
 }
 
 /* Private functions --------------------------------------------------------*/

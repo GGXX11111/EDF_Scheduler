@@ -18,7 +18,25 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 
+/* 任务事件标志 */
+#define EVENT_NULL              0x00000000
+#define EVENT_FULL              0xFFFFFFFF
+
 /* Exported types ------------------------------------------------------------*/
+
+/* 任务事件类型 */
+typedef uint32_t                task_event_t;       // 任务事件类型
+
+/* 任务优先级（数值越小优先级越高） */
+typedef enum task_priority
+{
+    TASK_PRIORITY_HIGHEST   = 0,                            // 最高优先级
+    TASK_PRIORITY_HIGH      = 1,                            // 高优先级
+    TASK_PRIORITY_NORMAL    = 2,                            // 正常优先级
+    TASK_PRIORITY_LOW       = 3,                            // 低优先级
+    TASK_PRIORITY_LOWEST    = 4,                            // 最低优先级
+    TASK_PRIORITY_MAX_COUNT = (TASK_PRIORITY_LOWEST + 1),   // 优先级数量
+} task_priority_t;
 
 /* 任务句柄类型 */
 typedef struct task_ctrl_blk task_t;
@@ -27,7 +45,7 @@ typedef struct task_ctrl_blk task_t;
  * @brief 任务初始化函数
  * @param task      任务句柄
  * @param task_data 任务相关数据指针
- * @note 在 task_create() 时自动执行，可为 NULL
+ * @note 在 task_init() 时自动执行，可为 NULL
  */
 typedef void (*fp_task_init_func)(task_t *task, void *task_data);
 
@@ -41,6 +59,22 @@ typedef void (*fp_task_init_func)(task_t *task, void *task_data);
 typedef task_event_t (*fp_task_handler_func)(task_t *task,
                                              task_event_t task_event,
                                              void *task_data);
+
+/**
+ * @brief 任务控制块
+ */
+struct task_ctrl_blk
+{
+    struct task_ctrl_blk *next_ready;       // 就绪队列下一个节点
+    task_priority_t task_priority;          // 任务优先级
+    volatile uint8_t inited;                // 初始化标志：0-未初始化，1-已初始化
+    uint8_t in_ready_list;                  // 就绪队列成员标志：1-已在队列中
+    uint8_t reserved0[2];
+    volatile task_event_t task_event;       // 任务事件标志
+    fp_task_init_func task_init_func;       // 初始化函数指针
+    fp_task_handler_func task_handler_func; // 事件处理函数指针
+    void *task_data;                        // 任务相关数据指针
+};
 
 /* Exported defines ----------------------------------------------------------*/
 
@@ -75,53 +109,41 @@ typedef task_event_t (*fp_task_handler_func)(task_t *task,
 /******************************************************************************/
 
 /**
- * @brief 创建任务
+ * @brief 初始化任务（静态创建）
+ * @param task         调用者提供的任务控制块（全局或静态变量）
  * @param init_func    任务初始化函数（可NULL）
  * @param handler_func 任务事件处理函数（不可NULL）
  * @param priority     任务优先级
  * @param task_data    任务数据指针（可NULL）
- * @return 成功返回任务句柄，失败返回NULL
- * @note 创建后立即调用 init_func(task, task_data)
+ * @return 成功返回 task，参数无效返回NULL
+ * @note 初始化后立即调用 init_func(task, task_data)
+ * @note 同一个 task 只能初始化一次，重复 init 会返回 NULL
+ * @note 初始化后长期存在，没有对应的销毁接口；
  * @note 禁止在中断上下文调用
  */
-task_t *task_create(fp_task_init_func init_func,
-                    fp_task_handler_func handler_func,
-                    task_priority_t priority,
-                    void *task_data);
-
-/**
- * @brief 删除任务并释放内存
- * @param task 任务句柄
- * @note 不应删除还在被使用的句柄
- * @note 不可重复删除，删除后需将句柄置 NULL
- * @note 禁止在中断上下文调用
- */
-void task_delete(task_t *task);
+task_t *task_init(task_t *task,
+                  fp_task_init_func init_func,
+                  fp_task_handler_func handler_func,
+                  task_priority_t priority,
+                  void *task_data);
 
 /**
  * @brief 设置任务事件
  * @param task  任务句柄
  * @param event 待设置的事件标志（可组合）
- * @return 成功返回EDF_SUCCESS，失败返回EDF_FAILURE
+ * @return 成功返回EDF_OK，失败返回EDF_ERR
  * @note 允许在中断上下文调用
  */
-uint8_t task_set_event(task_t *task, task_event_t event);
+edf_status_t task_set_event(task_t *task, task_event_t event);
 
 /**
  * @brief 清除任务事件
  * @param task  任务句柄
  * @param event 待清除的事件标志（可组合）
- * @return 成功返回EDF_SUCCESS，失败返回EDF_FAILURE
+ * @return 成功返回EDF_OK，失败返回EDF_ERR
  * @note 允许在中断上下文调用
  */
-uint8_t task_clear_event(task_t *task, task_event_t event);
-
-/**
- * @brief 获取当前正在运行的任务句柄
- * @return 当前任务句柄，未启动或无任务运行时返回NULL
- * @note 不应在中断上下文调用，属于无意义操作
- */
-task_t *task_get_current(void);
+edf_status_t task_clear_event(task_t *task, task_event_t event);
 
 /**
  * @brief 启动任务调度器，进入调度循环
