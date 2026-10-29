@@ -17,14 +17,17 @@
 /* 软件定时器双向链表 */
 typedef struct timer_list
 {
-    timer_t *head;                  // 链表头指针（NULL表示空链表）
-    timer_t *tail;                  // 链表尾指针（NULL表示空链表）
+    timer_t * volatile head;    // 链表头指针
+    timer_t * volatile tail;    // 链表尾指针
 } timer_list_t;
 
 /* Private variables ---------------------------------------------------------*/
 
 /* 硬件定时器激活状态 */
-static timer_hw_state_t g_timer_hw_active = TIMER_HW_INACTIVE;
+static volatile timer_hw_state_t g_timer_hw_active = TIMER_HW_INACTIVE;
+
+/* 硬件定时器是否已完成初始化 */
+static volatile uint8_t g_timer_hw_inited = 0;
 
 /* 全局软件定时器双向链表 */
 static timer_list_t g_timer_list = {0};
@@ -57,37 +60,28 @@ timer_t *timer_init(timer_t *timer,
                     timer_mode_t timer_mode,
                     timer_tick_t timer_reload,
                     task_t *notify_task,
-                    task_event_t notify_event)
+                    task_event_t notify_event,
+                    fp_timer_action_func real_time_action)
 {
     /* 参数检查 */
-    if (timer == (timer_t*)NULL || timer_reload == 0)
+    if (timer == (timer_t*)NULL || 
+		timer_reload == 0 || 
+		timer->inited != 0)
     {
         return (timer_t*)NULL;
     }
 
-    /* 已初始化的控制块不允许重复初始化，避免覆盖链表链接 */
-    if (timer->inited != 0)
-    {
-        return (timer_t*)NULL;
-    }
-
-    /* 初始化新定时器块（IDLE状态，追加到链表尾部） */
-    timer->next 		= (timer_t*)NULL;
-    timer->prev 		= (timer_t*)NULL;
-    timer->timer_mode 	= timer_mode;
-    timer->timer_reload = timer_reload;
-    timer->delta_ticks 	= 0;
-    timer->timer_status = TIMER_STATUS_IDLE;
-    timer->notify_task 	= notify_task;
-    timer->notify_event = notify_event;
-    timer->inited 		= 1;
-
-	HAL_ENTER_CRITICAL_SECTION();
-
-    /* 追加到链表尾部 */
-    dlist_push_back(timer);
-
-    HAL_EXIT_CRITICAL_SECTION();
+    /* 初始化定时器块 */
+    timer->next 			= (timer_t*)NULL;
+    timer->prev 			= (timer_t*)NULL;
+    timer->timer_mode 		= timer_mode;
+    timer->timer_reload 	= timer_reload;
+    timer->delta_ticks 		= 0;
+    timer->timer_status 	= TIMER_STATUS_IDLE;
+    timer->notify_task 		= notify_task;
+    timer->notify_event 	= notify_event;
+    timer->real_time_action = real_time_action;
+    timer->inited 			= 1;
 
     return timer;
 }
@@ -97,41 +91,49 @@ timer_t *timer_init(timer_t *timer,
  */
 edf_status_t timer_start(timer_t *timer)
 {
+    uint8_t inserted = 0;
+
     /* 参数检查 */
-    if (timer == (timer_t*)NULL || timer->inited == 0)
+    if (timer == (timer_t*)NULL || 
+		timer->inited == 0)
+    {
+        return EDF_ERR;
+    }
+
+    /* 硬件初始化 */
+    if (hw_timer_init(EDF_TICK_FREQ_HZ) != EDF_OK)
     {
         return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
 
-    /* 首次启动软件定时器时，初始化并启动硬件节拍定时器 */
+    if (timer->timer_status != TIMER_STATUS_RUNNING)
+    {
+        /* 设置运行参数并插入 delta 链表 */
+        timer->timer_status = TIMER_STATUS_RUNNING;
+        timer->delta_ticks = timer->timer_reload;
+        delta_insert(timer);
+        inserted = 1U;
+    }
+
+    /* 确认硬件确实启动 */
     if (g_timer_hw_active == TIMER_HW_INACTIVE)
     {
-        if ((hw_timer_init(EDF_TICK_FREQ_HZ) != EDF_OK) ||
-            (hw_timer_start() != EDF_OK))
+        if (hw_timer_start() != EDF_OK)
         {
+            /* 启动失败：回滚本次插入，避免定时器悬挂在链表中 */
+            if (inserted != 0U)
+            {
+                delta_splice_out(timer);
+                timer->timer_status = TIMER_STATUS_IDLE;
+            }
+
             HAL_EXIT_CRITICAL_SECTION();
 
             return EDF_ERR;
         }
     }
-
-    /* 如果已经在运行，则不再重新启动 */
-    if (timer->timer_status == TIMER_STATUS_RUNNING)
-    {
-        HAL_EXIT_CRITICAL_SECTION();
-
-        return EDF_OK;
-    }
-
-    /* 非运行状态：从链表尾部摘除 */
-    dlist_remove(timer);
-
-    /* 设置运行参数并插入 delta 链表 */
-    timer->timer_status = TIMER_STATUS_RUNNING;
-    timer->delta_ticks = timer->timer_reload;
-    delta_insert(timer);
 
     HAL_EXIT_CRITICAL_SECTION();
 
@@ -143,96 +145,166 @@ edf_status_t timer_start(timer_t *timer)
  */
 edf_status_t timer_stop(timer_t *timer)
 {
-    edf_status_t status = EDF_OK;
+    edf_status_t ret = EDF_OK;
 
     /* 参数检查 */
-    if (timer == (timer_t*)NULL || timer->inited == 0)
+    if (timer == (timer_t*)NULL || 
+		timer->inited == 0)
     {
         return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
 
-    /* 如果已经停止（非RUNNING），则不再重复停止 */
-    if (timer->timer_status != TIMER_STATUS_RUNNING)
+    if (timer->timer_status == TIMER_STATUS_RUNNING)
     {
-        HAL_EXIT_CRITICAL_SECTION();
+        /* 从链表中摘除定时器（自动补偿后继delta） */
+        delta_splice_out(timer);
 
-        return EDF_OK;
+        timer->timer_status = TIMER_STATUS_STOPPED;
+        timer->delta_ticks = 0;
+
+        if (g_timer_list.head == (timer_t*)NULL)
+        {
+            ret = hw_timer_stop();
+        }
+    }
+    else if (timer->timer_status == TIMER_STATUS_EXPIRED)
+    {
+        /* 显式停止已到期定时器，统一为 STOPPED */
+        timer->timer_status = TIMER_STATUS_STOPPED;
+        timer->delta_ticks = 0;
+    }
+	else
+	{
+		/* timer->timer_status == TIMER_STATUS_IDLE 
+		   timer->timer_status == TIMER_STATUS_STOPPED
+		   无需处理 */
+	}
+
+    HAL_EXIT_CRITICAL_SECTION();
+
+    return ret;
+}
+
+/**
+ * @brief 修改定时器模式
+ */
+edf_status_t timer_set_mode(timer_t *timer, timer_mode_t timer_mode)
+{
+    /* 参数检查 */
+    if (timer == (timer_t*)NULL || 
+		timer->inited == 0 || 
+    	(timer_mode != TIMER_MODE_SINGLE && 
+		timer_mode != TIMER_MODE_PERIODIC))
+    {
+        return EDF_ERR;
     }
 
-    /* 摘除（自动补偿后继delta） */
-    delta_splice_out(timer);
+    HAL_ENTER_CRITICAL_SECTION();
 
-    /* 置为STOPPED状态，追加到链表尾部 */
-    timer->timer_status = TIMER_STATUS_STOPPED;
-    timer->delta_ticks = 0;
-    dlist_push_back(timer);
+    timer->timer_mode = timer_mode;
 
-    /* 若无剩余 RUNNING 定时器，停止硬件定时器（RUNNING 节点一定在表头） */
-    if ((g_timer_list.head == (timer_t*)NULL ||
-         g_timer_list.head->timer_status != TIMER_STATUS_RUNNING) &&
-        (g_timer_hw_active == TIMER_HW_ACTIVE))
+    HAL_EXIT_CRITICAL_SECTION();
+
+    return EDF_OK;
+}
+
+/**
+ * @brief 修改定时器重载值
+ */
+edf_status_t timer_set_reload(timer_t *timer, timer_tick_t timer_reload)
+{
+    /* 参数检查 */
+    if (timer == (timer_t*)NULL || 
+		timer->inited == 0 || 
+		timer_reload == 0U)
     {
-        status = hw_timer_stop();
+        return EDF_ERR;
+    }
+
+    HAL_ENTER_CRITICAL_SECTION();
+
+    timer->timer_reload = timer_reload;
+
+    /* 运行中：摘除后按新周期重新插入，旧周期的剩余节拍作废 */
+    if (timer->timer_status == TIMER_STATUS_RUNNING)
+    {
+        delta_splice_out(timer);
+        timer->delta_ticks = timer_reload;
+        delta_insert(timer);
     }
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    return status;
+    return EDF_OK;
 }
 
 /**
  * @brief 定时器更新函数，应该在系统时钟中断服务程序中调用
  *
  * 处理流程：
- *   1. 若链表为空或头节点非 RUNNING，快速返回
- *   2. 递减头节点 delta_ticks
- *   3. 处理所有 delta_ticks==0 的到期定时器
+ *   1. 递减头节点 delta_ticks
+ *   2. 处理所有 delta_ticks==0 的到期定时器
+ *   3. 无活动定时器时停止硬件节拍
  */
 void timer_update(void)
 {
     timer_t *head;
 
-    /* 1. 无 RUNNING 定时器（链表空或头节点为IDLE），快速返回 */
-    if (g_timer_list.head == (timer_t*)NULL ||
-        g_timer_list.head->timer_status != TIMER_STATUS_RUNNING)
-    {
-        return;
-    }
-	
-    /* 2. 递减头节点 delta（仅操作链表头，O(1)） */
-    if (g_timer_list.head->delta_ticks > 0U)
-    {
-        g_timer_list.head->delta_ticks--;
-    }
+    HAL_ENTER_CRITICAL_SECTION();
 
-    /* 3. 处理所有在同一节拍到期的定时器（delta_ticks == 0） */
-    while (g_timer_list.head != (timer_t*)NULL &&
-           g_timer_list.head->timer_status == TIMER_STATUS_RUNNING &&
-           g_timer_list.head->delta_ticks == 0)
+    if (g_timer_list.head != (timer_t*)NULL)
     {
-        head = g_timer_list.head;
-
-        /* 触发超时事件 */
-        task_set_event(head->notify_task, head->notify_event);
-
-        if (head->timer_mode == TIMER_MODE_PERIODIC)
+        /* 1. 递减头节点 delta */
+        if (g_timer_list.head->delta_ticks > 0U)
         {
-            /* 周期定时器：摘除后重新插入 */
-            delta_splice_out(head);
-            head->timer_status = TIMER_STATUS_RUNNING;
-            head->delta_ticks = head->timer_reload;
-            delta_insert(head);
+            g_timer_list.head->delta_ticks--;
         }
-        else
+
+        /* 2. 处理所有在同一节拍到期的定时器 */
+        while (g_timer_list.head != (timer_t*)NULL &&
+               g_timer_list.head->timer_status == TIMER_STATUS_RUNNING &&
+               g_timer_list.head->delta_ticks == 0)
         {
-            /* 单次定时器：摘除，置EXPIRED，追加到链表尾部 */
-            delta_splice_out(head);
-            head->timer_status = TIMER_STATUS_EXPIRED;
-            dlist_push_back(head);
+            head = g_timer_list.head;
+
+            if ((head->timer_mode == TIMER_MODE_PERIODIC) &&
+                (head->timer_reload > 0U))
+            {
+                /* 周期定时器：摘除后重新插入 */
+                delta_splice_out(head);
+                head->timer_status = TIMER_STATUS_RUNNING;
+                head->delta_ticks = head->timer_reload;
+                delta_insert(head);
+            }
+            else
+            {
+                /* 单次定时器，或周期定时器 reload 为 0（异常情况）：
+            	   摘除并置 EXPIRED，避免 delta_ticks 恒为 0 导致死循环 */
+                delta_splice_out(head);
+                head->timer_status = TIMER_STATUS_EXPIRED;
+            }
+
+            /* 实时动作，在中断上下文执行，必须简短 */
+            if (head->real_time_action != (fp_timer_action_func)NULL)
+            {
+                head->real_time_action(head);
+            }
+
+            /* 触发超时事件，延迟执行 */
+            task_set_event(head->notify_task, head->notify_event);
         }
     }
+
+    /* 3. 无活动定时器则停止硬件，避免 ISR 空转 */
+    if ((g_timer_list.head == (timer_t*)NULL) &&
+        (g_timer_hw_active == TIMER_HW_ACTIVE))
+    {
+        hw_timer_stop();
+    }
+
+    HAL_EXIT_CRITICAL_SECTION();
 }
 
 /* Private functions --------------------------------------------------------*/
@@ -250,7 +322,19 @@ static edf_status_t hw_timer_init(timer_tick_t tick_freq)
         return EDF_ERR;
     }
 
-    return hal_timer_init(tick_freq);
+    if (g_timer_hw_inited != 0U)
+    {
+        return EDF_OK;
+    }
+
+    if (hal_timer_init(tick_freq) != EDF_OK)
+    {
+        return EDF_ERR;
+    }
+
+    g_timer_hw_inited = 1U;
+
+    return EDF_OK;
 }
 
 /**
@@ -294,7 +378,7 @@ static edf_status_t hw_timer_stop(void)
 }
 
 /**
- * @brief 将定时器追加到双向链表尾部（用于非运行状态的定时器）
+ * @brief 将定时器追加到双向链表尾部
  * @param timer 待追加的定时器
  */
 static void dlist_push_back(timer_t *timer)

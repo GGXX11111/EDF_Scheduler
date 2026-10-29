@@ -9,7 +9,6 @@
 
 #include "edf_msg_mgr.h"
 #include "edf_base.h"
-#include "edf_task_mgr.h"
 
 /* Private constants ---------------------------------------------------------*/
 
@@ -42,20 +41,18 @@ msg_queue_t *msg_queue_init(msg_queue_t *queue,
                             task_t *notify_task,
                             task_event_t notify_event)
 {
-    /* 参数检查：容量必须为 2 的幂（内部索引取模依赖此约束） */
-    if (queue == (msg_queue_t*)NULL || buffer == (uint8_t*)NULL ||
-        msg_size == 0 || capacity == 0 || !QUEUE_CAP_IS_POW2(capacity))
+    /* 参数检查 */
+    if (queue == (msg_queue_t*)NULL || 
+		buffer == (uint8_t*)NULL || 
+        msg_size == 0 || 
+		capacity == 0 || 
+		!QUEUE_CAP_IS_POW2(capacity) || 
+		queue->inited != 0)
     {
         return (msg_queue_t*)NULL;
     }
 
-    /* 已初始化的控制块不允许重复初始化，避免覆盖队列内部状态 */
-    if (queue->inited != 0)
-    {
-        return (msg_queue_t*)NULL;
-    }
-
-    /* 初始化队列 */
+    /* 初始化消息队列 */
     queue->buffer 		= buffer;
     queue->msg_size     = msg_size;
     queue->capacity     = capacity;
@@ -75,9 +72,12 @@ msg_queue_t *msg_queue_init(msg_queue_t *queue,
 edf_status_t msg_queue_send(msg_queue_t *queue, const void *data)
 {
     msg_len_t i;
+    hal_size_t base;
 
     /* 参数检查 */
-    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || data == (const void*)NULL)
+    if (queue == (msg_queue_t*)NULL || 
+		queue->inited == 0 || 
+		data == (const void*)NULL)
     {
         return EDF_ERR;
     }
@@ -93,9 +93,10 @@ edf_status_t msg_queue_send(msg_queue_t *queue, const void *data)
     }
 
     /* 拷贝固定长度数据到写指针位置 */
+    base = (hal_size_t)queue->tail * queue->msg_size;
     for (i = 0; i < queue->msg_size; i++)
     {
-        queue->buffer[queue->tail * queue->msg_size + i] = ((const uint8_t*)data)[i];
+        queue->buffer[base + i] = ((const uint8_t*)data)[i];
     }
 
     /* 移动写指针 */
@@ -119,9 +120,12 @@ edf_status_t msg_queue_send(msg_queue_t *queue, const void *data)
 edf_status_t msg_queue_recv(msg_queue_t *queue, void *out)
 {
     msg_len_t i;
+    hal_size_t base;
 
     /* 参数检查 */
-    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || out == (void*)NULL)
+    if (queue == (msg_queue_t*)NULL || 
+		queue->inited == 0 || 
+		out == (void*)NULL)
     {
         return EDF_ERR;
     }
@@ -137,9 +141,10 @@ edf_status_t msg_queue_recv(msg_queue_t *queue, void *out)
     }
 
     /* 从读指针位置拷贝固定长度数据 */
+    base = (hal_size_t)queue->head * queue->msg_size;
     for (i = 0; i < queue->msg_size; i++)
     {
-        ((uint8_t*)out)[i] = queue->buffer[queue->head * queue->msg_size + i];
+        ((uint8_t*)out)[i] = queue->buffer[base + i];
     }
 
     /* 移动读指针 */
@@ -157,8 +162,11 @@ edf_status_t msg_queue_recv(msg_queue_t *queue, void *out)
 edf_status_t msg_queue_peek(msg_queue_t *queue, void *out)
 {
     msg_len_t i;
+    hal_size_t base;
 
-    if (queue == (msg_queue_t*)NULL || queue->inited == 0 || out == (void*)NULL)
+    if (queue == (msg_queue_t*)NULL || 
+		queue->inited == 0 || 
+		out == (void*)NULL)
     {
         return EDF_ERR;
     }
@@ -173,9 +181,11 @@ edf_status_t msg_queue_peek(msg_queue_t *queue, void *out)
         return EDF_ERR;
     }
 
+    /* 从读指针位置拷贝固定长度数据 */
+    base = (hal_size_t)queue->head * queue->msg_size;
     for (i = 0; i < queue->msg_size; i++)
     {
-        ((uint8_t*)out)[i] = queue->buffer[queue->head * queue->msg_size + i];
+        ((uint8_t*)out)[i] = queue->buffer[base + i];
     }
 
     HAL_EXIT_CRITICAL_SECTION();
@@ -188,7 +198,8 @@ edf_status_t msg_queue_peek(msg_queue_t *queue, void *out)
  */
 msg_count_t msg_queue_get_count(msg_queue_t *queue)
 {
-    if (queue == (msg_queue_t*)NULL || queue->inited == 0)
+    if (queue == (msg_queue_t*)NULL || 
+		queue->inited == 0)
     {
         return 0;
     }
@@ -201,14 +212,16 @@ msg_count_t msg_queue_get_count(msg_queue_t *queue)
  */
 edf_status_t msg_queue_flush(msg_queue_t *queue)
 {
-    if (queue == (msg_queue_t*)NULL || queue->inited == 0)
+    if (queue == (msg_queue_t*)NULL || 
+		queue->inited == 0)
     {
         return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
 
-    queue->head  = queue->tail;
+    queue->head  = 0;
+	queue->tail  = 0;
     queue->count = 0;
 
     HAL_EXIT_CRITICAL_SECTION();

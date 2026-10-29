@@ -20,46 +20,48 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 
 /* 消息相关类型 */
-typedef uint16_t                msg_count_t;        // 消息数量类型
-typedef uint16_t                msg_len_t;          // 消息长度类型
+typedef uint16_t	msg_count_t;	// 消息数量类型
+typedef uint16_t	msg_len_t;  	// 消息长度类型
+
+/* 消息队列句柄类型 */
+typedef struct msg_queue msg_queue_t;
 
 /**
  * @brief 消息队列控制块
  */
-typedef struct msg_queue
+struct msg_queue
 {
-    uint8_t *buffer;            // 环形缓冲（由调用者提供，大小 >= msg_size × capacity）
-    msg_len_t msg_size;         // 单条消息的固定大小（字节）
-    volatile uint8_t inited;    // 初始化标志：0-未初始化，1-已初始化
+    uint8_t *buffer;            	// 环形缓冲（由调用者提供，大小 >= msg_size × capacity）
+    msg_len_t msg_size;         	// 单条消息的固定大小（字节）
+    uint8_t inited;    				// 初始化标志
 	uint8_t reserved0[1];
-    msg_count_t capacity;       // 队列最大可容纳的消息条数
-    volatile msg_count_t head;  // 读索引
-    volatile msg_count_t tail;  // 写索引
-    volatile msg_count_t count; // 当前消息数
-    task_t *notify_task;        // 消息到达时通知的任务
-    task_event_t notify_event;  // 消息到达时触发的事件标志
-} msg_queue_t;
+    msg_count_t capacity;       	// 最大可容纳的消息条数（必须为 2 的幂）
+    volatile msg_count_t head;  	// 读索引
+    volatile msg_count_t tail;  	// 写索引
+    volatile msg_count_t count; 	// 当前消息数
+    task_t *notify_task;        	// 消息到达时通知的任务
+    task_event_t notify_event;  	// 消息到达时触发的事件标志
+} ;
 
 /* Exported defines ----------------------------------------------------------*/
 
-/* Exported functions --------------------------------------------------------*/
+/**
+ * @brief 定义消息队列控制块，零初始化
+ */
+#define MSGQ_DEFINE(msg_queue)	msg_queue_t msg_queue = {0}
 
-/******************************************************************************/
-/*                        消息管理函数                                        */
-/******************************************************************************/
+/* Exported functions --------------------------------------------------------*/
 
 /**
  * @brief 初始化消息队列（静态创建）
- * @param queue        调用者提供的队列控制块（全局或静态变量）
+ * @param queue        调用者提供的队列控制块，必须零初始化
  * @param buffer       调用者提供的环形缓冲，长度必须 >= msg_size × capacity
  * @param msg_size     单条消息的固定大小（字节，不能为 0）
  * @param capacity     队列最大可容纳的消息条数，必须为 2 的幂
  * @param notify_task  消息到达时通知的任务句柄，可为NULL
  * @param notify_event 消息到达时触发的事件标志，仅在 notify_task 不为NULL时有效
- * @return 成功返回 queue，参数无效返回NULL
- * @note 同一个 queue 只能初始化一次，重复 init 会返回 NULL
- * @note 初始化后长期存在，没有对应的销毁接口；
- *       需要丢弃数据时使用 msg_queue_flush()
+ * @return 成功返回 queue，参数无效或重复初始化返回NULL
+ * @note 初始化后长期存在，没有对应的销毁接口
  * @note 禁止在中断上下文调用
  */
 msg_queue_t *msg_queue_init(msg_queue_t *queue,

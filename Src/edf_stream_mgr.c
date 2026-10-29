@@ -1,7 +1,7 @@
 /**
  ******************************************************************************
  * @file    edf_stream_mgr.c
- * @brief   字节流管理器实现（基于环形缓冲的字节流通道）
+ * @brief   字节流管理器实现
  ******************************************************************************
  */
 
@@ -57,42 +57,28 @@ stream_t *stream_init(stream_t *stream,
                       task_t *notify_task,
                       task_event_t notify_event)
 {
-    stream_t *new_stream;
-
-    /* 参数检查：容量必须为 2 的幂（内部索引取模依赖此约束） */
-    if (stream == (stream_t *)NULL || buffer == (uint8_t *)NULL ||
-        capacity == 0 || !STREAM_CAP_IS_POW2(capacity))
+    /* 参数检查 */
+    if (stream == (stream_t *)NULL || 
+		buffer == (uint8_t *)NULL || 
+        capacity == 0 || 
+		!STREAM_CAP_IS_POW2(capacity) || 
+		!STREAM_IS_ADDR_ALIGNED(buffer) || 
+		stream->inited != 0)
     {
         return (stream_t *)NULL;
     }
-
-    /* 缓冲区校验：未对齐会破坏 DMA 访问 */
-    if (!STREAM_IS_ADDR_ALIGNED(buffer))
-    {
-        return (stream_t *)NULL;
-    }
-
-    /* 已初始化的控制块不允许重复初始化，避免覆盖缓冲区信息 */
-    if (stream->inited != 0)
-    {
-        return (stream_t *)NULL;
-    }
-
-    /* 使用调用者提供的存储，不做动态分配 */
-    new_stream = stream;
-    new_stream->buffer = buffer;
 
     /* 初始化控制块 */
-    new_stream->capacity      = capacity;
-    new_stream->head          = 0;
-    new_stream->tail          = 0;
-    new_stream->count         = 0;
-    new_stream->overflow      = 0;
-    new_stream->notify_task   = notify_task;
-    new_stream->notify_event  = notify_event;
-    new_stream->inited        = 1;
+    stream->buffer 		  = buffer;
+    stream->capacity      = capacity;
+    stream->head          = 0;
+    stream->tail          = 0;
+    stream->count         = 0;
+    stream->notify_task   = notify_task;
+    stream->notify_event  = notify_event;
+    stream->inited        = 1;
 
-    return new_stream;
+    return stream;
 }
 
 /**
@@ -108,9 +94,13 @@ edf_status_t stream_write(stream_t *stream,
     hal_size_t first_chunk;
     hal_size_t second_chunk;
     uint8_t notify = 0;
+	hal_size_t idx;
 
     /* 参数检查 */
-    if (stream == (stream_t *)NULL || stream->inited == 0 || (data == (const void *)NULL && len != 0))
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0 || 
+		written == (hal_size_t *)NULL || 
+		(data == (const void *)NULL && len != 0))
     {
         return EDF_ERR;
     }
@@ -118,10 +108,7 @@ edf_status_t stream_write(stream_t *stream,
     /* 长度为 0 视为合法空操作 */
     if (len == 0)
     {
-        if (written != (hal_size_t *)NULL)
-        {
-            *written = 0;
-        }
+        *written = 0;
         return EDF_OK;
     }
 
@@ -131,10 +118,9 @@ edf_status_t stream_write(stream_t *stream,
 
     free_size = stream->capacity - stream->count;
 
-    /* 剩余空间不足：截断写入并置位溢出标志 */
+    /* 剩余空间不足：截断写入，实际写入量由 written 返回 */
     if (len > free_size)
     {
-        stream->overflow = 1;
         len = free_size;
     }
 
@@ -150,9 +136,10 @@ edf_status_t stream_write(stream_t *stream,
 
         if (first_chunk > 0)
         {
+			idx = STREAM_IDX(stream, stream->tail);
             for (hal_size_t i = 0; i < first_chunk; i++)
             {
-                stream->buffer[STREAM_IDX(stream, stream->tail) + i] = src[i];
+                stream->buffer[idx + i] = src[i];
             }
         }
         if (second_chunk > 0)
@@ -170,10 +157,7 @@ edf_status_t stream_write(stream_t *stream,
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    if (written != (hal_size_t *)NULL)
-    {
-        *written = len;
-    }
+    *written = len;
 
     /* 临界区外触发通知，避免临界区内做过长操作 */
     if (notify && stream->notify_task != (task_t *)NULL)
@@ -194,23 +178,23 @@ edf_status_t stream_read(stream_t *stream,
 {
     edf_status_t ret;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0 || (out == (void *)NULL && len != 0))
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0 || 
+		readed == (hal_size_t *)NULL || 
+		(out == (void *)NULL && len != 0))
     {
         return EDF_ERR;
     }
 
     if (len == 0)
     {
-        if (readed != (hal_size_t *)NULL)
-        {
-            *readed = 0;
-        }
+        *readed = 0;
         return EDF_OK;
     }
 
     ret = stream_peek(stream, out, len, readed);
 
-    if (ret == EDF_OK && readed != (hal_size_t *)NULL && *readed > 0)
+    if (ret == EDF_OK && *readed > 0)
     {
         HAL_ENTER_CRITICAL_SECTION();
 
@@ -231,7 +215,8 @@ const uint8_t *stream_get_read_ptr(stream_t *stream, hal_size_t *contig_len)
     const uint8_t *ptr;
     hal_size_t first_chunk;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         if (contig_len != (hal_size_t *)NULL)
         {
@@ -277,7 +262,8 @@ uint8_t *stream_get_write_ptr(stream_t *stream, hal_size_t *contig_len)
     hal_size_t free_size;
     hal_size_t first_chunk;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         if (contig_len != (hal_size_t *)NULL)
         {
@@ -322,7 +308,8 @@ edf_status_t stream_advance_read(stream_t *stream, hal_size_t len)
 {
     hal_size_t avail;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         return EDF_ERR;
     }
@@ -350,8 +337,10 @@ edf_status_t stream_advance_write(stream_t *stream, hal_size_t len)
 {
     hal_size_t free_size;
     uint8_t notify = 0;
+    edf_status_t ret = EDF_OK;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         return EDF_ERR;
     }
@@ -360,11 +349,11 @@ edf_status_t stream_advance_write(stream_t *stream, hal_size_t len)
 
     free_size = stream->capacity - stream->count;
 
-    /* 剩余空间不足：截断提交并置位溢出标志 */
+    /* 剩余空间不足：只提交能容纳的部分，并用返回值告知发生截断 */
     if (len > free_size)
     {
-        stream->overflow = 1;
         len = free_size;
+        ret = EDF_ERR;
     }
 
     if (len > 0)
@@ -382,7 +371,7 @@ edf_status_t stream_advance_write(stream_t *stream, hal_size_t len)
         task_set_event(stream->notify_task, stream->notify_event);
     }
 
-    return EDF_OK;
+    return ret;
 }
 
 /**
@@ -397,18 +386,19 @@ edf_status_t stream_peek(stream_t *stream,
     hal_size_t avail;
     hal_size_t first_chunk;
     hal_size_t second_chunk;
+	hal_size_t idx;
 
-    if (stream == (stream_t *)NULL || stream->inited == 0 || (out == (void *)NULL && len != 0))
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0 || 
+		peeked == (hal_size_t *)NULL || 
+		(out == (void *)NULL && len != 0))
     {
         return EDF_ERR;
     }
 
     if (len == 0)
     {
-        if (peeked != (hal_size_t *)NULL)
-        {
-            *peeked = 0;
-        }
+        *peeked = 0;
         return EDF_OK;
     }
 
@@ -434,9 +424,10 @@ edf_status_t stream_peek(stream_t *stream,
 
         if (first_chunk > 0)
         {
+            idx = STREAM_IDX(stream, stream->head);
             for (hal_size_t i = 0; i < first_chunk; i++)
             {
-                dst[i] = stream->buffer[STREAM_IDX(stream, stream->head) + i];
+                dst[i] = stream->buffer[idx + i];
             }
         }
         if (second_chunk > 0)
@@ -450,10 +441,7 @@ edf_status_t stream_peek(stream_t *stream,
 
     HAL_EXIT_CRITICAL_SECTION();
 
-    if (peeked != (hal_size_t *)NULL)
-    {
-        *peeked = len;
-    }
+    *peeked = len;
 
     return EDF_OK;
 }
@@ -463,7 +451,8 @@ edf_status_t stream_peek(stream_t *stream,
  */
 hal_size_t stream_get_used(stream_t *stream)
 {
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         return 0;
     }
@@ -472,110 +461,21 @@ hal_size_t stream_get_used(stream_t *stream)
 }
 
 /**
- * @brief 获取剩余字节数
- */
-hal_size_t stream_get_free(stream_t *stream)
-{
-    if (stream == (stream_t *)NULL || stream->inited == 0)
-    {
-        return 0;
-    }
-
-    return stream->capacity - stream->count;
-}
-
-/**
- * @brief 判断字节流是否为空
- */
-edf_bool_t stream_is_empty(stream_t *stream)
-{
-    if (stream == (stream_t *)NULL || stream->inited == 0)
-    {
-        return EDF_FALSE;
-    }
-
-    return (stream->count == 0) ? EDF_TRUE : EDF_FALSE;
-}
-
-/**
- * @brief 判断字节流是否已满
- */
-edf_bool_t stream_is_full(stream_t *stream)
-{
-    if (stream == (stream_t *)NULL || stream->inited == 0)
-    {
-        return EDF_FALSE;
-    }
-
-    return (stream->count >= stream->capacity) ? EDF_TRUE : EDF_FALSE;
-}
-
-/**
- * @brief 检查并清除溢出标志
- */
-edf_bool_t stream_check_overflow(stream_t *stream)
-{
-    edf_bool_t result;
-
-    if (stream == (stream_t *)NULL || stream->inited == 0)
-    {
-        return EDF_FALSE;
-    }
-
-    HAL_ENTER_CRITICAL_SECTION();
-
-    result = (stream->overflow != 0) ? EDF_TRUE : EDF_FALSE;
-    stream->overflow = 0;
-
-    HAL_EXIT_CRITICAL_SECTION();
-
-    return result;
-}
-
-/**
- * @brief 丢弃若干字节
- */
-edf_status_t stream_skip(stream_t *stream, hal_size_t len)
-{
-    hal_size_t avail;
-
-    if (stream == (stream_t *)NULL || stream->inited == 0)
-    {
-        return EDF_ERR;
-    }
-
-    HAL_ENTER_CRITICAL_SECTION();
-
-    avail = stream->count;
-    if (len > avail)
-    {
-        len = avail;
-    }
-
-    stream->head  += len;
-    stream->count -= len;
-
-    HAL_EXIT_CRITICAL_SECTION();
-
-    return EDF_OK;
-}
-
-/**
  * @brief 清空字节流
  */
 edf_status_t stream_flush(stream_t *stream)
 {
-    if (stream == (stream_t *)NULL || stream->inited == 0)
+    if (stream == (stream_t *)NULL || 
+		stream->inited == 0)
     {
         return EDF_ERR;
     }
 
     HAL_ENTER_CRITICAL_SECTION();
 
-    stream->head     = 0;
-    stream->tail     = 0;
-    stream->count    = 0;
-    stream->overflow = 0;
+    stream->head  = 0;
+    stream->tail  = 0;
+    stream->count = 0;
 
     HAL_EXIT_CRITICAL_SECTION();
 

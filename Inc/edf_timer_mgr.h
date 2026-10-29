@@ -22,7 +22,7 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 
 /* 定时器相关类型 */
-typedef uint32_t                timer_tick_t;       // 时钟节拍类型
+typedef uint32_t	timer_tick_t;       // 时钟节拍类型
 
 /* 硬件定时器状态 */
 typedef enum timer_hw_state
@@ -47,61 +47,76 @@ typedef enum timer_status
     TIMER_STATUS_EXPIRED    = 0x03,		// 已超时
 } timer_status_t;
 
+/* 定时器句柄类型 */
+typedef struct timer_blk timer_t;
+
+/**
+ * @brief 定时器到期实时动作
+ * @note 在定时器中断上下文中执行，动作务必简短：
+ *       禁止阻塞、禁止耗时循环、禁止调用非中断安全的接口
+ */
+typedef void (*fp_timer_action_func)(timer_t *timer);
+
 /**
  * @brief 定时器控制块
  */
-typedef struct timer_blk
+struct timer_blk
 {
-    struct timer_blk *next;         // 链表下一个节点
-    struct timer_blk *prev;         // 链表上一个节点
-    timer_mode_t timer_mode;        // 定时器模式
-    timer_status_t timer_status;    // 定时器状态
-    uint8_t inited;                 // 初始化标志：0-未初始化，1-已初始化
+    struct timer_blk * volatile next;       // 链表下一个节点
+    struct timer_blk * volatile prev;       // 链表上一个节点
+    volatile timer_mode_t timer_mode;     	// 定时器模式
+    volatile timer_status_t timer_status;   // 定时器状态
+    uint8_t inited;                         // 初始化标志
 	uint8_t reserved0[3];
-    timer_tick_t timer_reload;      // 重载值（周期）
-    timer_tick_t delta_ticks;       // 距离前一个定时器到期的剩余节拍数（Delta List）
-    task_t *notify_task;            // 超时时通知的任务
-    task_event_t notify_event;      // 超时时触发的事件标志
-} timer_t;
+    volatile timer_tick_t timer_reload;     // 重载值（周期）
+    volatile timer_tick_t delta_ticks;      // 距离前一个定时器到期的剩余节拍数（Delta List）
+    task_t *notify_task;                    // 超时时通知的任务
+    task_event_t notify_event;              // 超时时触发的事件标志
+    fp_timer_action_func real_time_action;  // 到期实时动作（中断上下文，务必简短）
+};
 
 /* Exported defines ----------------------------------------------------------*/
+
+/**
+ * @brief 定义定时器控制块，零初始化
+ */
+#define TIMER_DEFINE(timer)		timer_t timer = {0}	
 
 /**
  * @brief 毫秒转系统节拍数
  * @param ms 毫秒数
  */
-#define TIMER_MS(ms)        ((timer_tick_t)((ms) * EDF_TICK_FREQ_HZ / 1000))
+#define TIMER_MS(ms)        	((timer_tick_t)((ms) * EDF_TICK_FREQ_HZ / 1000))
 
 /**
  * @brief 秒转系统节拍数
  * @param sec 秒数
  */
-#define TIMER_SEC(sec)      ((timer_tick_t)((sec) * EDF_TICK_FREQ_HZ))
+#define TIMER_SEC(sec)      	((timer_tick_t)((sec) * EDF_TICK_FREQ_HZ))
 
 /* Exported functions --------------------------------------------------------*/
 
-/******************************************************************************/
-/*                        软件定时器管理函数                                  */
-/******************************************************************************/
-
 /**
  * @brief 初始化定时器（静态创建）
- * @param timer        调用者提供的定时器控制块（全局或静态变量）
- * @param timer_mode   定时器模式（单次/周期）
- * @param timer_reload 定时周期（系统节拍数，不能为0）
- * @param notify_task  超时时通知的任务句柄，可为NULL
- * @param notify_event 超时时触发的事件标志，仅在 notify_task 不为NULL时有效
- * @return 成功返回 timer，参数无效返回NULL
+ * @param timer        		调用者提供的定时器控制块，必须零初始化
+ * @param timer_mode   		定时器模式（单次/周期）
+ * @param timer_reload 		定时周期（系统节拍数，不能为0）
+ * @param notify_task  		超时时通知的任务句柄，可为NULL
+ * @param notify_event 		超时时触发的事件标志，仅在 notify_task 不为NULL时有效
+ * @param real_time_action 	到期实时动作，可为NULL
+ * @return 成功返回 timer，参数无效或重复初始化返回NULL
  * @note 初始化后处于 IDLE 状态，需调用 timer_start() 启动
- * @note 同一个 timer 只能初始化一次，重复 init 会返回 NULL
- * @note 初始化后长期存在，没有对应的销毁接口；
+ * @note 初始化后长期存在，没有对应的销毁接口
+ * @note real_time_action 在中断上下文中执行，动作务必简短：
+ *       禁止阻塞、禁止耗时循环、禁止调用非中断安全的接口
  * @note 禁止在中断上下文调用
  */
 timer_t *timer_init(timer_t *timer,
                     timer_mode_t timer_mode,
                     timer_tick_t timer_reload,
                     task_t *notify_task,
-                    task_event_t notify_event);
+                    task_event_t notify_event,
+                    fp_timer_action_func real_time_action);
 
 /**
  * @brief 启动定时器
@@ -120,6 +135,28 @@ edf_status_t timer_start(timer_t *timer);
  * @note 允许在中断上下文调用
  */
 edf_status_t timer_stop(timer_t *timer);
+
+/**
+ * @brief 修改定时器模式
+ * @param timer      定时器句柄
+ * @param timer_mode 新的定时器模式
+ * @return 成功返回EDF_OK，失败返回EDF_ERR
+ * @note 运行中的定时器在当前周期到期后按新模式生效，不打断正在进行的计时
+ * @note IDLE/STOPPED/EXPIRED 状态只更新模式，下次 timer_start() 生效
+ * @note 允许在中断上下文调用
+ */
+edf_status_t timer_set_mode(timer_t *timer, timer_mode_t timer_mode);
+
+/**
+ * @brief 修改定时器重载值
+ * @param timer        定时器句柄
+ * @param timer_reload 新的定时周期
+ * @return 成功返回EDF_OK，失败返回EDF_ERR
+ * @note 运行中的定时器立即按新周期重新计时，旧周期的剩余节拍被丢弃
+ * @note IDLE/STOPPED/EXPIRED 状态只更新重载值，下次 timer_start() 生效
+ * @note 允许在中断上下文调用
+ */
+edf_status_t timer_set_reload(timer_t *timer, timer_tick_t timer_reload);
 
 /**
  * @brief 更新所有软件定时器
