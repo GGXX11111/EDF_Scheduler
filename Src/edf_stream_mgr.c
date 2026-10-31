@@ -451,13 +451,21 @@ edf_status_t stream_peek(stream_t *stream,
  */
 hal_size_t stream_get_used(stream_t *stream)
 {
+	hal_size_t used;
+
     if (stream == (stream_t *)NULL || 
 		stream->inited == 0)
     {
         return 0;
     }
 
-    return stream->count;
+	HAL_ENTER_CRITICAL_SECTION();
+
+	used = stream->count;
+
+	HAL_EXIT_CRITICAL_SECTION();
+
+    return used;
 }
 
 /**
