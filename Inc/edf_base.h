@@ -51,40 +51,30 @@ typedef enum edf_bool
     EDF_TRUE  = 1       // 真
 } edf_bool_t;
 
-/* 中断开关 */
-#ifndef HAL_DISABLE_INTERRUPTS
-    #define HAL_DISABLE_INTERRUPTS()            /* empty */
-#endif
-#ifndef HAL_ENABLE_INTERRUPTS
-    #define HAL_ENABLE_INTERRUPTS()             /* empty */
-#endif
-
 /* 临界区嵌套计数器 */
 extern volatile hal_size_t g_critical_count;
 
+/* 开中断 */
+#ifndef HAL_DISABLE_INTERRUPTS
+    #define HAL_DISABLE_INTERRUPTS()            do { } while (0)
+#endif
+
+/* 关中断 */
+#ifndef HAL_ENABLE_INTERRUPTS
+    #define HAL_ENABLE_INTERRUPTS()             do { } while (0)
+#endif
+
 /* 进入临界区 */
 #ifndef HAL_ENTER_CRITICAL_SECTION
-    #define HAL_ENTER_CRITICAL_SECTION()        do { \
-                                                    if (g_critical_count == 0) { \
-                                                        HAL_DISABLE_INTERRUPTS(); \
-                                                    } \
-                                                    g_critical_count++; \
-                                                } while (0)
+    #define HAL_ENTER_CRITICAL_SECTION()		do { } while (0)
 #endif
 
 /* 退出临界区 */
 #ifndef HAL_EXIT_CRITICAL_SECTION
-    #define HAL_EXIT_CRITICAL_SECTION()         do { \
-                                                    if (g_critical_count > 0) { \
-                                                        g_critical_count--; \
-                                                        if (g_critical_count == 0) { \
-                                                            HAL_ENABLE_INTERRUPTS(); \
-                                                        } \
-                                                    } \
-                                                } while (0)
+    #define HAL_EXIT_CRITICAL_SECTION()			do { } while (0)
 #endif
 
-/* 空闲任务钩子函数 */
+/* 空闲任务钩子 */
 #ifndef EDF_IDLE_HOOK
     #define EDF_IDLE_HOOK()                     do { } while (0)
 #endif

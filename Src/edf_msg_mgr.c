@@ -198,13 +198,21 @@ edf_status_t msg_queue_peek(msg_queue_t *queue, void *out)
  */
 msg_count_t msg_queue_get_count(msg_queue_t *queue)
 {
+	msg_count_t count;
+
     if (queue == (msg_queue_t*)NULL || 
 		queue->inited == 0)
     {
         return 0;
     }
 
-    return queue->count;
+	HAL_ENTER_CRITICAL_SECTION();
+
+	count = queue->count;
+
+	HAL_EXIT_CRITICAL_SECTION();
+
+    return count;
 }
 
 /**
