@@ -19,6 +19,7 @@ extern "C" {
 #include "edf_timer_mgr.h"
 #include "edf_msg_mgr.h"
 #include "edf_stream_mgr.h"
+#include "edf_fsm_mgr.h"
 
 /* Exported constants --------------------------------------------------------*/
 
