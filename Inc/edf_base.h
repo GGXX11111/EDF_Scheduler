@@ -74,6 +74,26 @@ extern volatile hal_size_t g_critical_count;
     #define HAL_EXIT_CRITICAL_SECTION()			do { } while (0)
 #endif
 
+/* 原子操作 */
+#ifndef ATOMIC_ADD
+	#define ATOMIC_ADD(ptr, val)             	do { *(ptr) += (val); } while (0)
+#endif
+#ifndef ATOMIC_SUB
+	#define ATOMIC_SUB(ptr, val)             	do { *(ptr) -= (val); } while (0)
+#endif
+#ifndef ATOMIC_INC
+	#define ATOMIC_INC(ptr)                  	do { *(ptr) += 1; } while (0)
+#endif
+#ifndef ATOMIC_DEC
+	#define ATOMIC_DEC(ptr)                  	do { *(ptr) -= 1; } while (0)
+#endif
+#ifndef ATOMIC_OR
+	#define ATOMIC_OR(ptr, val)              	do { *(ptr) |= (val); } while (0)
+#endif
+#ifndef ATOMIC_AND
+	#define ATOMIC_AND(ptr, val)             	do { *(ptr) &= (val); } while (0)
+#endif
+
 /* 空闲任务钩子 */
 #ifndef EDF_IDLE_HOOK
     #define EDF_IDLE_HOOK()                     do { } while (0)

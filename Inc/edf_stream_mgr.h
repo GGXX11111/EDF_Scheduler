@@ -69,7 +69,7 @@ stream_t *stream_init(stream_t *stream,
  * @param stream  字节流句柄
  * @param data    待写入数据指针
  * @param len     请求写入字节数
- * @param written 实际写入字节数（返回值）
+ * @param written 实际写入字节数（输出）
  * @return 成功返回EDF_OK，失败返回EDF_ERR
  * @note 剩余空间不足时只写入能容纳的部分，实际写入量由 written 返回
  * @note len == 0 时为合法空操作，返回 EDF_OK 且 *written = 0
@@ -86,7 +86,7 @@ edf_status_t stream_write(stream_t *stream,
  * @param stream 字节流句柄
  * @param out    数据输出缓冲区
  * @param len    请求读取字节数
- * @param readed 实际读取字节数（返回值）
+ * @param readed 实际读取字节数（输出）
  * @return 成功返回EDF_OK，失败返回EDF_ERR
  * @note 缓冲不足时只读取已有部分，实际读取量由 readed 返回
  * @note len == 0 时为合法空操作，返回 EDF_OK 且 *readed = 0
@@ -147,7 +147,7 @@ edf_status_t stream_advance_read(stream_t *stream, hal_size_t len);
  * @param stream 字节流句柄
  * @param out    数据输出缓冲区
  * @param len    请求窥视字节数
- * @param peeked 实际窥视字节数（返回值）
+ * @param peeked 实际窥视字节数（输出）
  * @return 成功返回EDF_OK，失败返回EDF_ERR
  * @note 与 stream_read 行为一致，但不移动读索引、不更新计数
  * @note 允许在中断上下文调用

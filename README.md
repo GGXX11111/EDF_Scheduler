@@ -5,8 +5,8 @@
 ## 接入
 
 ```
-Inc/    edf.h（聚合头，只需包含它）、edf_base.h、edf_{task,timer,msg,stream}_mgr.h
-Src/    edf_base.c（HAL 移植层）、edf_{task,timer,msg,stream}_mgr.c
+Inc/    edf.h（聚合头，只需包含它）、edf_base.h、edf_{task,timer,msg,stream,fsm}_mgr.h
+Src/    edf_base.c（HAL 移植层）、edf_{task,timer,msg,stream,fsm}_mgr.c
 ```
 
 把 `Inc` 加入头文件路径，`Src` 下全部 `.c` 加入编译。
@@ -90,8 +90,6 @@ void USART1_IRQHandler(void)
 | `task_clear_event` | 清除事件位，清空时出就绪队列 | ✓ |
 | `task_scheduler_start` | 启动调度循环，不返回 | — |
 
-`handler` 返回**未处理的事件位**，调度器合并回任务并重新入队。禁止返回 `EVENT_FULL`。
-
 ### 定时器
 
 | 函数 | 说明 | 中断可用 |
@@ -101,8 +99,6 @@ void USART1_IRQHandler(void)
 | `timer_stop` | 停止 | ✓ |
 | `timer_set_mode` | 改单次 / 周期 | ✓ |
 | `timer_set_reload` | 改周期，运行中立即重新计时 | ✓ |
-
-到期**只置位绑定任务的事件**，不执行回调。`TIMER_MS()` / `TIMER_SEC()` 换算 tick。单次定时器到期后停在 `EXPIRED`，需 `timer_start()` 复用；`notify_task` 为 `NULL` 时到期无任何通知。
 
 ### 消息队列
 
@@ -124,6 +120,14 @@ void USART1_IRQHandler(void)
 | `stream_get_write_ptr` + `stream_advance_write` | 零拷贝写（DMA 场景） | ✓ |
 | `stream_get_read_ptr` + `stream_advance_read` | 零拷贝读 | ✓ |
 | `stream_get_used` / `stream_flush` | 已用字节数 / 清空 | ✓ |
+
+### 状态机
+
+| 函数 | 说明 | 中断可用 |
+| --- | --- | :---: |
+| `fsm_init` | 初始化，绑定初始状态与转移表 | ✗ |
+| `fsm_dispatch` | 派发一个事件，发生转移返回 `EDF_OK` | ✓ |
+| `fsm_get_state` / `fsm_is_state` | 读取当前状态 | ✓ |
 
 ## 移植
 
@@ -196,7 +200,12 @@ void hal_timer_isr(void)
 ## 注意
 
 1. `handler` 非抢占，必须快速返回；禁止死循环、忙等、阻塞调用。
-2. `*_init` 类函数禁止在中断中调用，其余运行期接口均中断安全。
-3. 控制块必须零初始化，用 `TASK_DEFINE` / `TIMER_DEFINE` / `MSGQ_DEFINE` / `STREAM_DEFINE`。
-4. 控制块创建后长期存在，没有销毁接口。
-5. 定时器 tick 为相对递减：关中断超过一个 tick 周期会丢 tick 且不会自愈，需控制临界区时长。
+2. `handler` 返回**未处理的事件位**，调度器合并回任务并重新入队。禁止返回 `EVENT_FULL`。
+3. `*_init` 类函数禁止在中断中调用，其余运行期接口均中断安全。
+4. 控制块必须零初始化，用 `TASK_DEFINE` / `TIMER_DEFINE` / `MSGQ_DEFINE` / `STREAM_DEFINE`。
+5. 控制块创建后长期存在，没有销毁接口。
+6. 定时器 tick 为相对递减：关中断超过一个 tick 周期会丢 tick 且不会自愈，需控制临界区时长。
+7. 定时器到期**只置位绑定任务的事件**，不执行回调。`TIMER_MS()` / `TIMER_SEC()` 换算 tick。单次定时器到期后停在 `EXPIRED`，需 `timer_start()` 复用；`notify_task` 为 `NULL` 时到期无任何通知。
+8. `fsm_dispatch()` 允许在中断中调用，但此时转移动作必须中断安全：不得阻塞、不得长时间循环、不得调用 `*_init`。建议中断侧只做状态迁移，耗时处理通过 `task_set_event()` 抛给任务。
+9. 转移表按顺序首次匹配；`fsm_dispatch` 先更新 `current_state` 再执行转移动作；动作内禁止再次 `fsm_dispatch`（被 `busy` 拒绝）；`to == FSM_STATE_SELF` 表示内部转移，只执行动作、不改状态。
+10. 同一个 `fsm_t` 实例只能由一个执行上下文派发。
