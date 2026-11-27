@@ -37,14 +37,27 @@ fsm_t *fsm_init(fsm_t *fsm,
                 uint16_t table_size,
                 void *user_data)
 {
+    uint16_t i;
+
     /* 参数检查 */
     if (fsm == (fsm_t*)NULL ||
         table == (const fsm_transition_t*)NULL ||
         table_size == 0U ||
-        initial_state == FSM_STATE_NONE ||
+        initial_state >= FSM_STATE_SELF ||
         fsm->inited != 0)
     {
         return (fsm_t*)NULL;
+    }
+
+    /* 校验转移表 */
+    for (i = 0U; i < table_size; i++)
+    {
+        if ((table[i].from >= FSM_STATE_SELF) ||
+            (table[i].to == FSM_STATE_NONE) ||
+            (table[i].event == FSM_EVENT_NULL))
+        {
+            return (fsm_t*)NULL;
+        }
     }
 
     /* 初始化状态机块 */
@@ -103,6 +116,30 @@ edf_status_t fsm_dispatch(fsm_t *fsm, fsm_event_t event)
     }
 
     fsm->busy = 0;
+
+    return EDF_OK;
+}
+
+/**
+ * @brief 复位状态机到初始状态
+ */
+edf_status_t fsm_reset(fsm_t *fsm)
+{
+    /* 参数检查 */
+    if (fsm == (fsm_t*)NULL || 
+		fsm->inited == 0)
+    {
+        return EDF_ERR;
+    }
+
+    /* 转移动作执行中不允许复位，避免状态被动作覆盖 */
+    if (fsm->busy != 0)
+    {
+        return EDF_ERR;
+    }
+
+    /* 只恢复状态，不执行任何转移动作 */
+    fsm->current_state = fsm->initial_state;
 
     return EDF_OK;
 }
