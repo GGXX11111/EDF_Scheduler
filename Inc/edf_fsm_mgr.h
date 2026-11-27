@@ -68,7 +68,7 @@ struct fsm
     fsm_state_t initial_state; 			// 初始状态
     void *user_data; 					// 用户上下文，透传给转移动作
     uint8_t inited; 					// 初始化标志
-    uint8_t busy; 						// 重入保护
+    volatile uint8_t busy; 				// 重入保护
     uint8_t reserved[2];
 };
 
@@ -88,8 +88,12 @@ struct fsm
  * @param table         转移表，必须为 const 静态数组
  * @param table_size    转移表条目数
  * @param user_data     用户上下文指针，可为 NULL
- * @return 成功返回 fsm，参数无效或重复初始化返回 NULL
- * @note 初始化后fsm处于 initial_state
+ * @return 成功返回 fsm，参数无效、转移表非法或重复初始化返回 NULL
+ * @note initial_state 必须是有效状态（0x00 ~ 0xFD），不能为 FSM_STATE_SELF / FSM_STATE_NONE
+ * @note 初始化时逐条校验转移表：from 必须为有效状态，to 不得为 FSM_STATE_NONE，
+ *       event 不得为 FSM_EVENT_NULL，否则返回 NULL
+ * @note 初始化后fsm处于 initial_state，但不执行任何动作；
+ *       需要进入初始状态的初始化动作时，由调用者在 fsm_init() 之后自行完成
  * @note 初始化后长期存在，没有对应的销毁接口
  * @note 禁止在中断上下文调用
  */
@@ -114,8 +118,19 @@ fsm_t *fsm_init(fsm_t *fsm,
  * @note 若任务与中断、或可嵌套的不同优先级中断需要共享同一实例，必须由调用者
  *       在更高层加临界区，且只包住本函数调用，不得包住转移动作；中断侧应使用
  *       BASEPRI 方式，避免 PRIMASK 屏蔽全部中断。
+ * @note 单事件位与不重入的约定由调用者保证，框架内部不做断言或检查
  */
 edf_status_t fsm_dispatch(fsm_t *fsm, fsm_event_t event);
+
+/**
+ * @brief 复位状态机到初始状态
+ * @param fsm 状态机句柄
+ * @return 成功返回 EDF_OK；参数无效、未初始化或重入返回 EDF_ERR
+ * @note 只修改 current_state 为 initial_state，不执行任何转移动作；
+ *       需要恢复初始状态的初始化动作时由调用者自行完成
+ * @note 与 fsm_dispatch() 必须处于同一执行上下文，不可在转移动作内调用
+ */
+edf_status_t fsm_reset(fsm_t *fsm);
 
 /**
  * @brief 获取当前状态

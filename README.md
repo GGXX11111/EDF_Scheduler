@@ -125,8 +125,9 @@ void USART1_IRQHandler(void)
 
 | 函数 | 说明 | 中断可用 |
 | --- | --- | :---: |
-| `fsm_init` | 初始化，绑定初始状态与转移表 | ✗ |
+| `fsm_init` | 初始化，绑定初始状态与转移表（校验表项） | ✗ |
 | `fsm_dispatch` | 派发一个事件，发生转移返回 `EDF_OK` | ✓ |
+| `fsm_reset` | 恢复初始状态，不执行转移动作 | ✓ |
 | `fsm_get_state` / `fsm_is_state` | 读取当前状态 | ✓ |
 
 ## 移植
@@ -209,3 +210,4 @@ void hal_timer_isr(void)
 8. `fsm_dispatch()` 允许在中断中调用，但此时转移动作必须中断安全：不得阻塞、不得长时间循环、不得调用 `*_init`。建议中断侧只做状态迁移，耗时处理通过 `task_set_event()` 抛给任务。
 9. 转移表按顺序首次匹配；`fsm_dispatch` 先更新 `current_state` 再执行转移动作；动作内禁止再次 `fsm_dispatch`（被 `busy` 拒绝）；`to == FSM_STATE_SELF` 表示内部转移，只执行动作、不改状态。
 10. 同一个 `fsm_t` 实例只能由一个执行上下文派发。
+11. `fsm_init` 只设置初始状态，不执行任何动作；需要上电初始化动作时，在 `fsm_init()` 之后自行调用。`fsm_init` 会校验整张转移表（`from` 合法、`to` 非 `FSM_STATE_NONE`、`event` 非空），表误直接返回 `NULL`。`event` 只含一个事件位、同一实例不重入派发，均由调用者保证，框架不做运行期检查。
